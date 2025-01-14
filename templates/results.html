@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Generated Q-A Pairs</title>
+    <style>
+        .answer {
+            display: none;
+            margin-left: 20px;
+        }
+        .qa-item {
+            margin-bottom: 15px;
+        }
+        .qa-item strong {
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <h1>Generated Questions &amp; Answers</h1>
+
+    {% if qa_pairs %}
+        <ul style="list-style-type: none; padding: 0;">
+        {% for question, answer, remark in qa_pairs %}
+            <li class="qa-item">
+                <div>
+                    <!-- 显示问题，附带数字 -->
+                    <strong>Q{{ loop.index }}:</strong> {{ question }}
+                    <!-- 点击此按钮显示/隐藏对应答案 -->
+                    <button onclick="toggleAnswer(this)">Show the answer</button>
+                </div>
+                <!-- 答案容器，默认隐藏 -->
+                <div class="answer">
+                    <strong>A:</strong> {{ answer }} <br>
+                    <em>Remark:</em> {{ remark }}
+                </div>
+            </li>
+        {% endfor %}
+        </ul>
+    {% else %}
+        <p>No questions or answers generated.</p>
+    {% endif %}
+
+    {% if eval_result %}
+    <hr>
+    <h2>Evaluation Metrics</h2>
+    <p><strong>Question Diversity:</strong> {{ eval_result.question_diversity }}</p>
+    <p><strong>Average Coverage:</strong> {{ eval_result.avg_question_coverage }}</p>
+    <p><strong>Average Correctness:</strong> {{ eval_result.avg_answer_correctness }}</p>
+    {% endif %}
+
+    <p><a href="/">Go Back</a></p>
+
+    <script>
+    function toggleAnswer(button) {
+        let answerDiv = button.parentElement.nextElementSibling;
+        if (!answerDiv) return;
+        if (answerDiv.style.display === 'none' || answerDiv.style.display === '') {
+            answerDiv.style.display = 'block';
+            button.textContent = 'Hide the answer';
+        } else {
+            answerDiv.style.display = 'none';
+            button.textContent = 'Show the answer';
+        }
+    }
+    </script>
+</body>
+</html>
