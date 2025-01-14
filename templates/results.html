@@ -2,7 +2,7 @@
 <html>
 <head>
     <meta charset="UTF-8">
-    <title>Generated Q-A Pairs</title>
+    <title>Generated Questions & Answers</title>
     <style>
         .answer {
             display: none;
@@ -21,32 +21,22 @@
 
     {% if qa_pairs %}
         <ul style="list-style-type: none; padding: 0;">
-        {% for question, answer, remark in qa_pairs %}
-            <li class="qa-item">
-                <div>
-                    <!-- 显示问题，附带数字 -->
-                    <strong>Q{{ loop.index }}:</strong> {{ question }}
-                    <!-- 点击此按钮显示/隐藏对应答案 -->
-                    <button onclick="toggleAnswer(this)">Show the answer</button>
-                </div>
-                <!-- 答案容器，默认隐藏 -->
-                <div class="answer">
-                    <strong>A:</strong> {{ answer }} <br>
-                    <em>Remark:</em> {{ remark }}
-                </div>
+            {% for question, pdf_answer, llm_answer, remark in qa_pairs %}
+                <li class="qa-item">
+                    <div>
+                        <strong>Q{{ loop.index }}:</strong> {{ question }}
+                        <button onclick="toggleAnswer(this)">Show the answer</button>
+                    </div>
+                    <div class="answer">
+                        <p><strong>A1 (from PDF):</strong> {{ pdf_answer }}</p>
+                        <p><strong>A2 (from LLM):</strong> {{ llm_answer }}</p>
+                        <p><em>Remark:</em> {{ remark }}</p>
+                    </div>
             </li>
-        {% endfor %}
+            {% endfor %}
         </ul>
     {% else %}
         <p>No questions or answers generated.</p>
-    {% endif %}
-
-    {% if eval_result %}
-    <hr>
-    <h2>Evaluation Metrics</h2>
-    <p><strong>Question Diversity:</strong> {{ eval_result.question_diversity }}</p>
-    <p><strong>Average Coverage:</strong> {{ eval_result.avg_question_coverage }}</p>
-    <p><strong>Average Correctness:</strong> {{ eval_result.avg_answer_correctness }}</p>
     {% endif %}
 
     <p><a href="/">Go Back</a></p>
@@ -57,12 +47,22 @@
         if (!answerDiv) return;
         if (answerDiv.style.display === 'none' || answerDiv.style.display === '') {
             answerDiv.style.display = 'block';
-            button.textContent = 'Hide the answer';
+            button.textContent = 'Hide the answers';
         } else {
             answerDiv.style.display = 'none';
-            button.textContent = 'Show the answer';
+            button.textContent = 'Show the answers';
         }
     }
     </script>
+
+    {% if eval_result %}
+        <hr>
+        <h2>Evaluation Metrics</h2>
+        <p><strong>Question Diversity:</strong> {{ eval_result.question_diversity }}</p>
+        <p><strong>Average Coverage:</strong> {{ eval_result.avg_question_coverage }}</p>
+        <p><strong>Average Correctness:</strong> {{ eval_result.avg_answer_correctness }}</p>
+        <p><strong>Average Answer Length:</strong> {{ eval_result.avg_answer_length }}</p>
+        <p><strong>Unanswerable Ratio:</strong> {{ eval_result.unanswerable_ratio }}</p>
+    {% endif %}
 </body>
 </html>

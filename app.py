@@ -34,16 +34,13 @@ llama_tokenizer = AutoTokenizer.from_pretrained(llama_model_path, use_fast=False
 llama_model = AutoModelForCausalLM.from_pretrained(
     llama_model_path,
     torch_dtype=torch.float16,
-    device_map="auto"
+    device_map="cpu"
 )
+
+# print(llama_model.hf_device_map)
 
 # 4. Sentence-Transformers (检索、评估)
 embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
-
-# 如果需要 NLTK 资源
-# nltk.download('punkt')
-# nltk.download('stopwords')
-
 
 # =========================
 # (B) 业务逻辑辅助函数
@@ -63,17 +60,54 @@ def chunk_text(raw_text, chunk_size=500, overlap=50):
         start += (chunk_size - overlap)
     return chunks
 
+def evaluate_questions_and_answers(
+    pdf_content: str,
+    questions: List[str],
+    answers: List[str]
+) -> Dict:
+    results = {}
+
+    # (1) 多样性
+    results["question_diversity"] = question_diversity_score(questions, embedding_model)
+
+    # (2) 覆盖度
+    coverage_scores = [keyword_coverage_score(pdf_content, q) for q in questions]
+    results["avg_question_coverage"] = float(np.mean(coverage_scores))
+
+    # (3) 正确性
+    ref_text = pdf_content[:500] if len(pdf_content) > 500 else pdf_content
+    correctness_scores = []
+    for ans in answers:
+        correctness_scores.append(semantic_similarity(ref_text, ans, embedding_model))
+    results["avg_answer_correctness"] = float(np.mean(correctness_scores))
+
+    # (4) 额外指标：比如“平均答案长度”
+    lengths = [len(a.split()) for a in answers]
+    results["avg_answer_length"] = float(np.mean(lengths))
+
+    # (5) 额外指标：比如“可回答性”
+    # 可能需要先看 answers 是否是 "Error ..."，计数
+    unanswerable_count = sum(1 for a in answers if a.lower().startswith("error") or len(a.strip()) < 5)
+    results["unanswerable_ratio"] = unanswerable_count / len(answers)
+
+    return {k: round(v, 4) for k,v in results.items()}
 
 def generate_questions_for_paragraph(paragraph, each_paragraph_q=2):
     """
     使用 QG 模型一次生成多条问题，若输出包含 <sep>，则进行拆分。
+    这里用随机采样参数来提高问题多样性。
     """
     prompt = f"Generate questions: {paragraph}"
+    # 你可以根据业务需求调高temperature，增大top_p，以获得更随机的结果
     inputs = qg_tokenizer.encode(prompt, return_tensors="pt", max_length=512, truncation=True)
     outputs = qg_model.generate(
         inputs,
         max_length=128,
-        num_beams=each_paragraph_q,
+        do_sample=True,       # 打开随机采样
+        top_k=50,
+        top_p=0.9,
+        temperature=1.1,
+        num_beams=1,          # 不用beam search
         num_return_sequences=each_paragraph_q,
         early_stopping=True
     )
@@ -86,7 +120,6 @@ def generate_questions_for_paragraph(paragraph, each_paragraph_q=2):
         all_questions.extend(splitted)
     return all_questions
 
-
 def answer_question_extractive(question, context_text):
     """
     调用抽取式 QA 模型，获取答案
@@ -97,26 +130,40 @@ def answer_question_extractive(question, context_text):
     except Exception as e:
         return f"Error extracting answer from PDF: {str(e)}"
 
-
 def answer_question_with_llm(question, context):
     """
-    使用 Llama (或其他 CausalLM) 生成式回答
+    生成式回答
     """
-    prompt = f"Context: {context}\n\nQuestion: {question}\n\nAnswer:"
+    # 这里用一个更详细的 Prompt，告诉模型要简洁回答
+    prompt = f"""You are an AI assistant helping to answer questions based on the given context.
+Please provide a concise answer (under 50 words) focusing on key information, 
+and avoid repeating the entire context verbatim.
+
+Context:
+{context}
+
+Question:
+{question}
+
+Answer:
+"""
+
     try:
-        inputs = llama_tokenizer.encode(prompt, return_tensors="pt", max_length=512, truncation=True)
+        # 将 max_length=128 改用 max_new_tokens=256
+        # 且继续使用 do_sample/top_p/temperature 等
+        inputs = llama_tokenizer.encode(prompt, return_tensors="pt", max_length=1024, truncation=True)
         outputs = llama_model.generate(
             inputs,
-            max_length=128,
+            max_new_tokens=256,
             do_sample=True,
             top_k=50,
             top_p=0.95,
             temperature=1.0
         )
+        
         return llama_tokenizer.decode(outputs[0], skip_special_tokens=True)
     except Exception as e:
-        return f"Error generating answer with Llama: {str(e)}"
-
+        return f"Error generating with Llama: {str(e)}"
 
 def retrieve_top_k_paragraphs(question, paragraphs, paragraph_embeddings, k=2):
     """
@@ -132,24 +179,26 @@ def retrieve_top_k_paragraphs(question, paragraphs, paragraph_embeddings, k=2):
 
 def double_check_answers(pdf_answer, llm_answer):
     """
-    简单的答案合并策略：
-    - 如果抽取式答案足够长 / 不为空，则优先使用 PDF answer
-    - 否则使用 LLM answer
-    - 也可自行改成对比相似度、置信度等
+    简单的对比：
+    - 如果 PDF 答案长度足够，默认认为 PDF 答案可靠
+    - 如果和 LLM 完全相同 => remark = "Same answer from both PDF and LLM"
+    - 如果不同 => remark = "Discrepancy ..."
+    返回: (final_answer, remark)
+    但我们只用 remark，用来告诉前端差异情况。
     """
     pdf_ans_clean = pdf_answer.strip().lower()
     llm_ans_clean = llm_answer.strip().lower()
-    if len(pdf_ans_clean) > 5 and pdf_ans_clean not in ["error", "error extracting answer"]:
-        # 表示抽取式答案比较可用
+
+    if len(pdf_ans_clean) > 5 and not pdf_ans_clean.startswith("error"):
+        # PDF answer 非空
         if pdf_ans_clean == llm_ans_clean:
-            # 两者一致
-            return pdf_answer, "一致 (来自 PDF)"
+            return pdf_answer, "Same answer from both PDF and LLM"
         else:
-            # 不一致，但 PDF answer 可用
-            return pdf_answer, "不一致 (PDF 答案为准)"
+            return pdf_answer, "Discrepancy (the answer from PDF more reliable)"
     else:
-        # 抽取式 QA 无答案，或出错 -> 用 LLM
-        return llm_answer, "不一致 (LLM 答案为准)"
+        # PDF answer 无效
+        return llm_answer, "Discrepancy (the answer from LLM more reliable)"
+
 
 
 # =========================
@@ -218,11 +267,21 @@ def evaluate_questions_and_answers(
         score = semantic_similarity(ref_text, ans, embedding_model)
         correctness_scores.append(score)
     avg_correctness = float(np.mean(correctness_scores)) if correctness_scores else 0.0
+    
+    lengths = [len(a.split()) for a in answers]
+    avg_answer_length = float(np.mean(lengths))
+
+    unanswerable_count = sum(
+        1 for a in answers if a.lower().startswith("error") or len(a.strip()) < 5
+    )
+    unanswerable_ratio = unanswerable_count / len(answers)
 
     return {
         "question_diversity": round(diversity, 4),
         "avg_question_coverage": round(avg_coverage, 4),
         "avg_answer_correctness": round(avg_correctness, 4),
+        "avg_answer_length": round(avg_answer_length, 4),
+        "unanswerable_ratio": round(unanswerable_ratio, 4)
     }
 
 
@@ -300,22 +359,31 @@ def generate_quiz():
     # 7) 对每个问题做检索 + QA + LLM
     qa_pairs = []
     for question, para_idx in collected_qp:
-        # (a) 先检索最相关的 2 个段落
+        # (a) 检索最相关段落
         retrieved_paras = retrieve_top_k_paragraphs(question, paragraphs, paragraph_embeddings, k=2)
-        # (b) 拼接这两个段落作为 QA context
         context_for_qa = "\n".join(retrieved_paras)
-        # (c) 抽取式 QA
-        pdf_answer = answer_question_extractive(question, context_for_qa)
-        # (d) 如果需要，也可以让 LLM 给出生成式答案
-        llm_answer = answer_question_with_llm(question, entire_context)
-        # (e) 双重检查并合并答案
-        final_answer, remark = double_check_answers(pdf_answer, llm_answer)
-        qa_pairs.append((question, final_answer, remark))
 
-    # 8) （可选）评估问答质量
+        # (b) 抽取式 QA
+        pdf_answer = answer_question_extractive(question, context_for_qa)
+
+        # (c) LLM 生成答案
+        llm_answer = answer_question_with_llm(question, entire_context)
+
+        # (d) 对比 remark
+        #    注意: double_check_answers() 返回 (final_answer, remark)
+        #    但我们只需要把 "pdf_answer", "llm_answer", 和 "remark" 存起来。
+        final_answer, remark = double_check_answers(pdf_answer, llm_answer)
+
+        # => 这里存成四元组 (question, pdf_answer, llm_answer, remark)
+        qa_pairs.append((question, pdf_answer, llm_answer, remark))
+
+    # 8) 评估逻辑 (可选)
     questions_for_eval = [p[0] for p in qa_pairs]
+    # 这里我们拿 p[1] 即 pdf_answer 做评估，或者也可以拿 final_answer
     answers_for_eval = [p[1] for p in qa_pairs]
     evaluation_result = evaluate_questions_and_answers(entire_context, questions_for_eval, answers_for_eval)
+
+    return render_template('results.html', qa_pairs=qa_pairs, eval_result=evaluation_result)
 
     # 9) 渲染结果
     return render_template('results.html', qa_pairs=qa_pairs, eval_result=evaluation_result)
